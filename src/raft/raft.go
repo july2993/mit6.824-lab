@@ -28,7 +28,7 @@ import (
 // import "encoding/gob"
 
 const ElectionTimeout = time.Millisecond * 100
-const PingPeerPeriod = time.Millisecond * 1
+const PingPeerPeriod = time.Millisecond * 20
 
 type Role int
 
@@ -79,11 +79,16 @@ type Raft struct {
 	LastUpdateTime time.Time
 
 	applyCh chan ApplyMsg
+
+	//
+	needAppend bool
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	var term int
 	var isleader bool
@@ -152,36 +157,38 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// Your code here.
-	reply.Term = rf.CurrentTerm
 	if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.setFlower()
 	}
+
+	reply.Term = rf.CurrentTerm
 
 	if rf.Role != FlowerRole {
 		reply.VoteGranted = false
 		return
 	}
 
+	// 5.1
 	if args.Term < rf.CurrentTerm {
 		reply.VoteGranted = false
 		return
 	}
 
+	// check vote
 	if rf.VotedFor != -1 && rf.VotedFor != args.CandidateId {
 		reply.VoteGranted = false
 		return
 	}
 
-	if args.LastLogIndex < len(rf.Log) {
-		reply.VoteGranted = false
-		return
+	if len(rf.Log) > 0 {
+		if rf.lastLog().Term > args.LastLogTerm ||
+			rf.lastLog().Term == args.LastLogTerm && len(rf.Log) > args.LastLogIndex {
+			reply.VoteGranted = false
+			return
+		}
 	}
-
-	if len(rf.Log) > 0 && rf.lastLog().Term < args.LastLogTerm {
-		reply.VoteGranted = false
-		return
-	}
+	// end check vote
 
 	reply.VoteGranted = true
 	rf.VotedFor = args.CandidateId
@@ -202,9 +209,35 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
+// 5.2
+func (rf *Raft) checkPreLog(prevLogIndex int, prevLogTerm int) bool {
+	if prevLogIndex <= 0 {
+		return true
+	}
+
+	if len(rf.Log) < prevLogIndex {
+		return false
+	}
+
+	if rf.Log[prevLogIndex-1].Term != prevLogTerm {
+		return false
+	}
+
+	return true
+}
+
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if len(args.Entries) > 0 {
+		DPrintf("*%+v* args: %+v reply: %+v\n", rf.me, args, *reply)
+		for i := 0; i < len(rf.Log); i++ {
+			DPrintf("%v\n", rf.Log[i])
+		}
+	}
+
+	defer func() {
+	}()
 
 	reply.Term = rf.CurrentTerm
 	if rf.Role == FlowerRole {
@@ -216,13 +249,57 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		rf.setFlower()
 	}
 
+	// 5.1
 	if args.Term < rf.CurrentTerm {
 		reply.Success = false
 		return
 	}
 
+	// 5.2
+	if rf.checkPreLog(args.PrevLogIndex, args.PrevLogTerm) == false {
+		reply.Success = false
+		return
+	}
+
+	// 5.3
+	for i := 0; i < len(args.Entries); i++ {
+		rf.appendLogAt(args.Entries[i], args.PrevLogIndex+(i+1))
+	}
+
+	// ok
+	if args.LeaderCommit > rf.CommitIndex {
+		if args.PrevLogIndex+len(args.Entries) > rf.CommitIndex {
+			rf.CommitIndex = args.PrevLogIndex + len(args.Entries)
+			DPrintf("%v flowwer commit: %d\n", rf.me, rf.CommitIndex)
+		}
+	}
+
 	reply.Success = true
 	return
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+
+	return b
+}
+
+func (rf *Raft) appendLogAt(entry *LogEntry, index int) {
+	if len(rf.Log)+1 < index {
+		panic("err index")
+	}
+
+	if len(rf.Log)+1 == index {
+		rf.Log = append(rf.Log, entry)
+		return
+	}
+
+	if rf.Log[index-1].Term != entry.Term {
+		rf.Log[index-1] = entry
+		rf.Log = rf.Log[:index]
+	}
 }
 
 //
@@ -263,14 +340,18 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	if rf.Role != LeaterRole {
-		return -1, -1, false
-	}
-
 	index := -1
 	term := -1
 	isLeader := true
+
+	defer func() {
+		// fmt.Printf("Start retrun: %d %d %v\n", index, term, isLeader)
+	}()
+
+	if rf.Role != LeaterRole {
+		isLeader = false
+		return index, term, isLeader
+	}
 
 	for i := 0; i < len(rf.Log); i++ {
 		if rf.Log[i].Command == command {
@@ -288,6 +369,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	rf.Log = append(rf.Log, entry)
+	rf.MatchIndex[rf.me] = len(rf.Log)
 	index = len(rf.Log)
 
 	return index, term, isLeader
@@ -304,12 +386,11 @@ func (rf *Raft) Kill() {
 }
 
 func (rf *Raft) setFlower() {
-	// 不可重复设置导致投票给不同peer
-	if rf.Role == FlowerRole {
-		return
-	}
+	DPrintf("%v from %v to %v\n", rf.me, rf.Role, FlowerRole)
 	rf.VotedFor = -1
 	rf.Role = FlowerRole
+	rf.LastUpdateTime = time.Now()
+	rf.needAppend = false
 }
 
 //
@@ -328,68 +409,195 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
+	rf.NextIndex = make([]int, len(peers))
+	rf.MatchIndex = make([]int, len(peers))
 	rf.me = me
 
 	// Your initialization code here.
+	rand.Seed(int64(me))
+
 	rf.setFlower()
-	rf.applyCh = make(chan ApplyMsg, 10)
+	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// DPrintf("my role: %v", rf.Role)
 
-	go rf.loog()
+	go rf.loop()
 
 	return rf
 }
 
+// 5.3 5.4
+func (rf *Raft) checkCanCommit(n int) bool {
+	// n := rf.CommitIndex + 1
+	// if len(rf.Log) < n {
+	// 	return false
+	// }
+	if len(rf.Log) < n || rf.Log[n-1].Term != rf.CurrentTerm {
+		return false
+	}
+
+	matchCount := 0
+	for i := 0; i < len(rf.peers); i++ {
+		if rf.MatchIndex[i] >= n {
+			matchCount++
+		}
+	}
+
+	if matchCount*2 > len(rf.peers) {
+		return true
+	}
+
+	return false
+}
+
 func (rf *Raft) pingPeer() {
 	for _ = range time.Tick(PingPeerPeriod) {
-		if rf.Role != LeaterRole && rf.Role != CandidateRole {
+		rf.mu.Lock()
+		// apply log
+		// todo: whild apply more a time
+		if rf.CommitIndex > rf.LastAppllyed {
+			rf.LastAppllyed++
+			msg := ApplyMsg{
+				Index:   rf.LastAppllyed,
+				Command: rf.Log[rf.LastAppllyed-1].Command,
+			}
+			go func() {
+				rf.applyCh <- msg
+			}()
+			// fmt.Printf("%d apply: %d %+v\n", rf.me, rf.LastAppllyed, msg)
+		}
+
+		if !rf.needAppend {
+			rf.mu.Unlock()
 			continue
 		}
 
+		// master commit log
+		if rf.Role == LeaterRole {
+			// DPrintf("*%+v* \n", *rf)
+			for cn := rf.CommitIndex + 1; cn <= len(rf.Log); cn++ {
+				if rf.checkCanCommit(cn) {
+					DPrintf("%v leader commit: %d %+v\n", rf.me, cn, *rf.Log[cn-1])
+					// fmt.Printf("leader commit: %d\n", rf.CommitIndex+1)
+					rf.CommitIndex = cn
+				}
+			}
+		}
+
+		// leader or candidate AppendEntrys Flowwers
 		var args AppendEntriesArgs
 		args.Term = rf.CurrentTerm
 		args.LeaderId = rf.me
 		args.LeaderCommit = rf.CommitIndex
-		args.Entries = nil
-		// my todo
-		// args.PrevLogIndex = len(rf.Log)
-		// args.PrevLogTerm = rf.lastLog()
-		for i := 0; i < len(rf.peers); i++ {
-			func(server int) {
-				var reply = new(AppendEntriesArgs)
-				rf.peers[server].Call("Raft.AppendEntries", args, reply)
-			}(i)
+
+		for server := 0; server < len(rf.peers); server++ {
+			if server == rf.me {
+				continue
+			}
+
+			if rf.Role == LeaterRole {
+				args.Entries = nil
+				args.PrevLogIndex = 0
+				args.PrevLogTerm = 0
+
+				if rf.NextIndex[server] == 0 {
+					rf.NextIndex[server] = len(rf.Log) + 1
+				}
+				if rf.NextIndex[server] <= len(rf.Log) {
+					args.Entries = append(args.Entries, rf.Log[rf.NextIndex[server]-1])
+				}
+
+				args.PrevLogIndex = rf.NextIndex[server] - 1
+				if args.PrevLogIndex < 0 {
+					args.PrevLogIndex = 0
+				}
+				if args.PrevLogIndex > 0 {
+					args.PrevLogTerm = rf.Log[args.PrevLogIndex-1].Term
+				}
+			}
+
+			go func(server int, args AppendEntriesArgs) {
+				var reply = new(AppendEntriesReply)
+				ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+				// 返回可能失效了，比如我已经不是leater怎么处理好
+				if ok {
+					rf.mu.Lock()
+					if reply.Term > rf.CurrentTerm {
+						rf.CurrentTerm = reply.Term
+						rf.setFlower()
+					}
+					if reply.Success {
+
+						rf.MatchIndex[server] = args.PrevLogIndex + len(args.Entries)
+						rf.NextIndex[server] = rf.MatchIndex[server] + 1
+					} else {
+						if rf.NextIndex[server] > 0 {
+							rf.NextIndex[server]--
+						}
+					}
+
+					rf.mu.Unlock()
+				}
+
+			}(server, args)
 		}
+
+		rf.mu.Unlock()
 	}
 }
 
-func (cf *Raft) appendFlower() {
-
+func (rf *Raft) getPingCommand() (cmd interface{}) {
+	return rand.Int()
 }
 
-func (rf *Raft) loog() {
+func (rf *Raft) loop() {
+	rf.LastUpdateTime = time.Now().Add(-time.Duration(rand.Intn(int(ElectionTimeout))))
+
 	go rf.pingPeer()
+
+	go func() {
+		for {
+			select {
+			case <-time.Tick(time.Millisecond * 500):
+				DPrintf("tick %v --- %+v\n", rf.me, *rf)
+
+			}
+		}
+	}()
 
 	for {
 		select {
-		case <-time.Tick(time.Millisecond * 10):
+		case <-time.Tick(time.Millisecond * 1):
+			rf.mu.Lock()
+			if rf.Role == LeaterRole {
+				if rf.CommitIndex < len(rf.Log) && rf.getLastLogTerm() != rf.CurrentTerm {
+					rf.mu.Unlock()
+					rf.Start(rf.getPingCommand())
+					rf.mu.Lock()
+				}
+			}
+
 			now := time.Now()
 			if rf.Role == FlowerRole && rf.LastUpdateTime.Add(ElectionTimeout).Before(now) {
 				go rf.beCandidate()
-				continue
 			}
+			rf.mu.Unlock()
 		}
 
 	}
 }
 
 func (rf *Raft) beCandidate() {
+	rf.mu.Lock()
+	if rf.Role == CandidateRole {
+		panic("repeat candidate")
+	}
 	rf.Role = CandidateRole
-	DPrintf("%+v: beCandidate", *rf)
+	rf.mu.Unlock()
+	DPrintf("%+v: beCandidate", rf.me)
 
 	nextElect := time.NewTimer(time.Millisecond)
 
@@ -397,19 +605,30 @@ func (rf *Raft) beCandidate() {
 		select {
 		case <-nextElect.C:
 			if rf.Role != CandidateRole {
+				DPrintf("%+v: to be not candidate\n", rf.me)
 				return
 			}
 
+			rf.mu.Lock()
 			rf.CurrentTerm++
+			rf.needAppend = true
 			tryTerm := rf.CurrentTerm
+			rf.mu.Unlock()
+			DPrintf("try elect: %+v\n", *rf)
 			if rf.tryGetVote() {
 				DPrintf("%+v: vote success", *rf)
+				rf.mu.Lock()
 				if tryTerm == rf.CurrentTerm {
 					rf.Role = LeaterRole
+					rf.mu.Unlock()
+					return
 				}
-				return
+				rf.mu.Unlock()
 			} else {
-				nextElect = time.NewTimer(ElectionTimeout + time.Duration(rand.Intn(int(ElectionTimeout))))
+				rf.needAppend = false
+				wait := time.Duration(rand.Intn(3 * int(ElectionTimeout)))
+				DPrintf("vote fail wait: +%v\n", wait)
+				nextElect = time.NewTimer(wait)
 			}
 
 		}
@@ -426,11 +645,13 @@ func (rf *Raft) getLastLogTerm() int {
 }
 
 func (rf *Raft) tryGetVote() bool {
+	rf.mu.Lock()
 	var args RequestVoteArgs
 	args.CandidateId = rf.me
 	args.LastLogIndex = len(rf.Log)
 	args.LastLogTerm = rf.getLastLogTerm()
 	args.Term = rf.CurrentTerm
+	rf.mu.Unlock()
 
 	votes := make(chan bool, len(rf.peers))
 	voteCount := 0
@@ -452,16 +673,22 @@ func (rf *Raft) tryGetVote() bool {
 	}
 
 	recvResultCount := 0
-	for vote := range votes {
-		recvResultCount++
-		if vote {
-			voteCount++
-		}
-		if voteCount*2 > len(rf.peers) {
-			return true
-		}
+	timeout := time.NewTimer(ElectionTimeout)
+	for {
+		select {
+		case vote := <-votes:
+			recvResultCount++
+			if vote {
+				voteCount++
+			}
+			if voteCount*2 > len(rf.peers) {
+				return true
+			}
 
-		if recvResultCount == len(rf.peers) {
+			if (len(rf.peers)-recvResultCount+voteCount)*2 <= len(rf.peers) {
+				return false
+			}
+		case <-timeout.C:
 			return false
 		}
 	}
