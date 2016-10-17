@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"encoding/json"
+	"fmt"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -29,6 +31,7 @@ import (
 
 const ElectionTimeout = time.Millisecond * 100
 const PingPeerPeriod = time.Millisecond * 40
+const MaxEntrysPerTime = 20
 
 type Role int
 
@@ -67,13 +70,14 @@ type Raft struct {
 	// Your data here.
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	CurrentTerm  int
-	VotedFor     int
-	Log          []*LogEntry
-	CommitIndex  int
-	LastAppllyed int
-	NextIndex    []int
-	MatchIndex   []int
+	CurrentTerm          int
+	VotedFor             int
+	Log                  []*LogEntry
+	CommitIndex          int
+	LeaderLastCommitTime time.Time
+	LastAppllyed         int
+	NextIndex            []int
+	MatchIndex           []int
 
 	Role           Role
 	LastUpdateTime time.Time
@@ -81,7 +85,7 @@ type Raft struct {
 	applyCh chan ApplyMsg
 
 	//
-	needAppend bool
+	NeedAppend bool
 }
 
 // return currentTerm and whether this server
@@ -112,12 +116,25 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	data, err = json.Marshal(rf)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	rf.persister.SaveSnapshot(data)
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
+	err := json.Unmarshal(data, rf)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
 	// Your code here.
 	// Example:
 	// r := bytes.NewBuffer(data)
@@ -389,7 +406,7 @@ func (rf *Raft) setFlower() {
 	rf.VotedFor = -1
 	rf.Role = FlowerRole
 	rf.LastUpdateTime = time.Now()
-	rf.needAppend = false
+	rf.NeedAppend = false
 }
 
 //
@@ -417,6 +434,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.setFlower()
 	rf.applyCh = applyCh
+	rf.LastUpdateTime = time.Now().Add(-time.Duration(rand.Intn(int(ElectionTimeout))))
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -469,7 +487,7 @@ func (rf *Raft) pingPeer() {
 			// fmt.Printf("%d apply: %d %+v\n", rf.me, rf.LastAppllyed, msg)
 		}
 
-		if !rf.needAppend {
+		if !rf.NeedAppend {
 			rf.mu.Unlock()
 			continue
 		}
@@ -482,6 +500,7 @@ func (rf *Raft) pingPeer() {
 					DPrintf("%v leader commit: %d %+v\n", rf.me, cn, *rf.Log[cn-1])
 					// fmt.Printf("leader commit: %d\n", rf.CommitIndex+1)
 					rf.CommitIndex = cn
+					rf.LeaderLastCommitTime = time.Now()
 				}
 			}
 		}
@@ -505,9 +524,14 @@ func (rf *Raft) pingPeer() {
 				if rf.NextIndex[server] == 0 {
 					rf.NextIndex[server] = len(rf.Log) + 1
 				}
-				if rf.NextIndex[server] <= len(rf.Log) {
-					args.Entries = append(args.Entries, rf.Log[rf.NextIndex[server]-1])
+
+				entryNum := len(rf.Log) - rf.NextIndex[server] + 1
+				if entryNum > MaxEntrysPerTime {
+					entryNum = MaxEntrysPerTime
 				}
+
+				start := rf.NextIndex[server] - 1
+				args.Entries = append(args.Entries, rf.Log[start:start+entryNum]...)
 
 				args.PrevLogIndex = rf.NextIndex[server] - 1
 				if args.PrevLogIndex < 0 {
@@ -553,7 +577,6 @@ func (rf *Raft) getPingCommand() (cmd interface{}) {
 }
 
 func (rf *Raft) loop() {
-	rf.LastUpdateTime = time.Now().Add(-time.Duration(rand.Intn(int(ElectionTimeout))))
 
 	go rf.pingPeer()
 
@@ -572,7 +595,7 @@ func (rf *Raft) loop() {
 		case <-time.Tick(time.Millisecond * 1):
 			rf.mu.Lock()
 			if rf.Role == LeaterRole {
-				if rf.CommitIndex < len(rf.Log) && rf.getLastLogTerm() != rf.CurrentTerm {
+				if rf.CommitIndex < len(rf.Log) && rf.getLastLogTerm() != rf.CurrentTerm && rf.LeaderLastCommitTime.Add(ElectionTimeout*5).Before(time.Now()) {
 					rf.mu.Unlock()
 					rf.Start(rf.getPingCommand())
 					rf.mu.Lock()
@@ -610,7 +633,7 @@ func (rf *Raft) beCandidate() {
 
 			rf.mu.Lock()
 			rf.CurrentTerm++
-			rf.needAppend = true
+			rf.NeedAppend = true
 			tryTerm := rf.CurrentTerm
 			rf.mu.Unlock()
 			DPrintf("try elect: %+v\n", *rf)
@@ -619,12 +642,13 @@ func (rf *Raft) beCandidate() {
 				rf.mu.Lock()
 				if tryTerm == rf.CurrentTerm {
 					rf.Role = LeaterRole
+					rf.LeaderLastCommitTime = time.Now()
 					rf.mu.Unlock()
 					return
 				}
 				rf.mu.Unlock()
 			} else {
-				rf.needAppend = false
+				rf.NeedAppend = false
 				wait := time.Duration(rand.Intn(3 * int(ElectionTimeout)))
 				DPrintf("vote fail wait: +%v\n", wait)
 				nextElect = time.NewTimer(wait)
