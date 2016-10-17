@@ -28,7 +28,7 @@ import (
 // import "encoding/gob"
 
 const ElectionTimeout = time.Millisecond * 100
-const PingPeerPeriod = time.Millisecond * 20
+const PingPeerPeriod = time.Millisecond * 40
 
 type Role int
 
@@ -348,6 +348,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// fmt.Printf("Start retrun: %d %d %v\n", index, term, isLeader)
 	}()
 
+	term = rf.CurrentTerm
+
 	if rf.Role != LeaterRole {
 		isLeader = false
 		return index, term, isLeader
@@ -356,9 +358,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	for i := 0; i < len(rf.Log); i++ {
 		if rf.Log[i].Command == command {
 			index = i + 1
-			if rf.CommitIndex >= index {
-				term = rf.CurrentTerm
-			}
 			return index, term, isLeader
 		}
 	}

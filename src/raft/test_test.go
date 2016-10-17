@@ -431,6 +431,7 @@ loop:
 		starti, term, ok := cfg.rafts[leader].Start(1)
 		if !ok {
 			// leader moved on really quickly
+			fmt.Println("--fk-- too quick")
 			continue
 		}
 		cmds := []int{}
@@ -439,11 +440,11 @@ loop:
 			cmds = append(cmds, x)
 			index1, term1, ok := cfg.rafts[leader].Start(x)
 			if term1 != term {
-				// Term changed while starting
+				fmt.Println(" Term changed while starting")
 				continue loop
 			}
 			if !ok {
-				// No longer the leader, so term has changed
+				fmt.Println("--fk-- No longer the leader, so term has changed")
 				continue loop
 			}
 			if starti+i != index1 {
@@ -456,6 +457,7 @@ loop:
 			if ix, ok := cmd.(int); ok == false || ix != cmds[i-1] {
 				if ix == -1 {
 					// term changed -- try again
+					fmt.Println("--fk-- term changed -- try again")
 					continue loop
 				}
 				t.Fatalf("wrong value %v committed for index %v; expected %v\n", cmd, starti+i, cmds)
@@ -474,6 +476,7 @@ loop:
 		}
 
 		if failed {
+			fmt.Println("--fk-- test count fail")
 			continue loop
 		}
 
