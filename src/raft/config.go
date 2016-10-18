@@ -8,16 +8,24 @@ package raft
 // test with the original before submitting.
 //
 
-import "labrpc"
-import "log"
+import (
+	"labrpc"
+	"log"
+	"reflect"
+	"testing"
+
+	crand "crypto/rand"
+	"fmt"
+	"sync/atomic"
+)
+
 import "sync"
-import "testing"
+
 import "runtime"
-import crand "crypto/rand"
+
 import "encoding/base64"
-import "sync/atomic"
+
 import "time"
-import "fmt"
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -164,7 +172,7 @@ func (cfg *config) start1(i int) {
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}
 			} else {
-				err_msg = fmt.Sprintf("committed command %v is not an int", m.Command)
+				err_msg = fmt.Sprintf("committed command %v is not an int %v", m.Command, reflect.TypeOf(m.Command))
 			}
 
 			if err_msg != "" {

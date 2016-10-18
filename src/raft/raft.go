@@ -18,8 +18,8 @@ package raft
 //
 
 import (
-	"encoding/json"
-	"fmt"
+	"bytes"
+	"encoding/gob"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -110,37 +110,42 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here.
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
-	data, err = json.Marshal(rf)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.CurrentTerm)
+	e.Encode(rf.VotedFor)
+	e.Encode(rf.Log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 
-	rf.persister.SaveSnapshot(data)
+	// data, err := json.Marshal(rf)
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	return
+	// }
+	// rf.persister.SaveRaftState(data)
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	err := json.Unmarshal(data, rf)
-	if err != nil {
-		fmt.Println(err)
+	if len(data) == 0 {
 		return
 	}
-
 	// Your code here.
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	// d.Decode(&rf.xxx)
-	// d.Decode(&rf.yyy)
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.CurrentTerm)
+	d.Decode(&rf.VotedFor)
+	d.Decode(&rf.Log)
+
+	// err := json.Unmarshal(data, rf)
+	// if err != nil {
+	// 	fmt.Println(err)
+	// return
+	// }
 }
 
 //
@@ -173,6 +178,9 @@ func (rf *Raft) lastLog() *LogEntry {
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer func() {
+		rf.persist()
+	}()
 	// Your code here.
 	if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
@@ -246,15 +254,16 @@ func (rf *Raft) checkPreLog(prevLogIndex int, prevLogTerm int) bool {
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer func() {
+		rf.persist()
+	}()
+
 	if len(args.Entries) > 0 {
 		DPrintf("*%+v* args: %+v reply: %+v\n", rf.me, args, *reply)
 		for i := 0; i < len(rf.Log); i++ {
 			DPrintf("%v\n", rf.Log[i])
 		}
 	}
-
-	defer func() {
-	}()
 
 	reply.Term = rf.CurrentTerm
 	if rf.Role == FlowerRole {
@@ -357,6 +366,10 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer func() {
+		rf.persist()
+	}()
+
 	index := -1
 	term := -1
 	isLeader := true
@@ -439,6 +452,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	for _, log := range rf.Log {
+		_ = log
+		// fmt.Printf("*********** %v %v \n", log.Command, reflect.TypeOf(log.Command))
+		// log.Command = int(reflect.ValueOf(log.Command).Float())
+		// fmt.Printf("*********** %v %v \n", log.Command, reflect.TypeOf(log.Command))
+	}
+
 	// DPrintf("my role: %v", rf.Role)
 
 	go rf.loop()
@@ -475,14 +495,17 @@ func (rf *Raft) pingPeer() {
 		rf.mu.Lock()
 		// apply log
 		// todo: whild apply more a time
+		// todo: persist?
 		if rf.CommitIndex > rf.LastAppllyed {
-			rf.LastAppllyed++
 			msg := ApplyMsg{
-				Index:   rf.LastAppllyed,
-				Command: rf.Log[rf.LastAppllyed-1].Command,
+				Index:   rf.LastAppllyed + 1,
+				Command: rf.Log[rf.LastAppllyed].Command,
 			}
 			go func() {
 				rf.applyCh <- msg
+				rf.mu.Lock()
+				rf.LastAppllyed++
+				rf.mu.Unlock()
 			}()
 			// fmt.Printf("%d apply: %d %+v\n", rf.me, rf.LastAppllyed, msg)
 		}
