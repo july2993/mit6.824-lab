@@ -481,21 +481,6 @@ func (rf *Raft) pingPeer() {
 	for _ = range time.Tick(PingPeerPeriod) {
 		rf.mu.Lock()
 		// apply log
-		// todo: whild apply more a time
-		// todo: persist?
-		if rf.CommitIndex > rf.LastAppllyed {
-			msg := ApplyMsg{
-				Index:   rf.LastAppllyed + 1,
-				Command: rf.Log[rf.LastAppllyed].Command,
-			}
-			go func() {
-				rf.applyCh <- msg
-				rf.mu.Lock()
-				rf.LastAppllyed++
-				rf.mu.Unlock()
-			}()
-			// fmt.Printf("%d apply: %d %+v\n", rf.me, rf.LastAppllyed, msg)
-		}
 
 		if !rf.NeedAppend {
 			rf.mu.Unlock()
@@ -600,7 +585,20 @@ func (rf *Raft) loop() {
 		}
 	}()
 
+	var applyCh chan ApplyMsg
+	var applyMsg ApplyMsg
 	for {
+		rf.mu.Lock()
+		if applyCh == nil && rf.CommitIndex > rf.LastAppllyed {
+			msg := ApplyMsg{
+				Index:   rf.LastAppllyed + 1,
+				Command: rf.Log[rf.LastAppllyed].Command,
+			}
+			applyCh = rf.applyCh
+			applyMsg = msg
+		}
+		rf.mu.Unlock()
+
 		select {
 		case <-time.Tick(time.Millisecond * 1):
 			rf.mu.Lock()
@@ -616,6 +614,11 @@ func (rf *Raft) loop() {
 			if rf.Role == FlowerRole && rf.LastUpdateTime.Add(ElectionTimeout).Before(now) {
 				go rf.beCandidate()
 			}
+			rf.mu.Unlock()
+		case applyCh <- applyMsg:
+			applyCh = nil
+			rf.mu.Lock()
+			rf.LastAppllyed++
 			rf.mu.Unlock()
 		}
 
