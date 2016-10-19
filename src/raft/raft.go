@@ -31,7 +31,7 @@ import (
 
 const ElectionTimeout = time.Millisecond * 100
 const PingPeerPeriod = time.Millisecond * 40
-const MaxEntrysPerTime = 20
+const MaxEntrysPerTime = 100
 
 type Role int
 
@@ -118,12 +118,6 @@ func (rf *Raft) persist() {
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 
-	// data, err := json.Marshal(rf)
-	// if err != nil {
-	// 	fmt.Println(err)
-	// 	return
-	// }
-	// rf.persister.SaveRaftState(data)
 }
 
 //
@@ -133,19 +127,12 @@ func (rf *Raft) readPersist(data []byte) {
 	if len(data) == 0 {
 		return
 	}
-	// Your code here.
-	// Example:
 	r := bytes.NewBuffer(data)
 	d := gob.NewDecoder(r)
 	d.Decode(&rf.CurrentTerm)
 	d.Decode(&rf.VotedFor)
 	d.Decode(&rf.Log)
 
-	// err := json.Unmarshal(data, rf)
-	// if err != nil {
-	// 	fmt.Println(err)
-	// return
-	// }
 }
 
 //
