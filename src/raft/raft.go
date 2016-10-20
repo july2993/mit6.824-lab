@@ -20,6 +20,7 @@ package raft
 import (
 	"bytes"
 	"encoding/gob"
+	"fmt"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -240,9 +241,9 @@ func (rf *Raft) checkPreLog(prevLogIndex int, prevLogTerm int) bool {
 
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	defer func() {
 		rf.persist()
+		rf.mu.Unlock()
 	}()
 
 	if len(args.Entries) > 0 {
@@ -516,7 +517,7 @@ func (rf *Raft) pingPeer() {
 				args.PrevLogIndex = 0
 				args.PrevLogTerm = 0
 
-				if rf.NextIndex[server] == 0 {
+				if rf.NextIndex[server] == 0 || rf.NextIndex[server] > len(rf.Log)+1 {
 					rf.NextIndex[server] = len(rf.Log) + 1
 				}
 
@@ -526,6 +527,9 @@ func (rf *Raft) pingPeer() {
 				}
 
 				start := rf.NextIndex[server] - 1
+				if start+entryNum > len(rf.Log) || start < 0 {
+					fmt.Println("fuck: ", len(rf.Log), start, entryNum)
+				}
 				args.Entries = append(args.Entries, rf.Log[start:start+entryNum]...)
 
 				args.PrevLogIndex = rf.NextIndex[server] - 1
@@ -655,6 +659,7 @@ func (rf *Raft) beCandidate() {
 				rf.mu.Lock()
 				if tryTerm == rf.CurrentTerm {
 					rf.Role = LeaterRole
+					rf.MatchIndex = make([]int, len(rf.peers))
 					rf.LeaderLastCommitTime = time.Now()
 					rf.mu.Unlock()
 					return
