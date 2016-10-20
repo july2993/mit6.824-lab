@@ -30,8 +30,8 @@ import (
 // import "bytes"
 // import "encoding/gob"
 
-const ElectionTimeout = time.Millisecond * 100
-const PingPeerPeriod = time.Millisecond * 40
+const ElectionTimeout = time.Millisecond * 300
+const PingPeerPeriod = time.Millisecond * 50
 const MaxEntrysPerTime = 100
 
 type Role int
@@ -254,9 +254,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	}
 
 	reply.Term = rf.CurrentTerm
-	if rf.Role == FlowerRole {
-		rf.LastUpdateTime = time.Now()
-	}
 
 	if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
@@ -286,6 +283,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			rf.CommitIndex = args.PrevLogIndex + len(args.Entries)
 			DPrintf("%v flowwer commit: %d\n", rf.me, rf.CommitIndex)
 		}
+	}
+
+	if rf.Role == FlowerRole {
+		rf.LastUpdateTime = time.Now()
 	}
 
 	reply.Success = true
@@ -666,6 +667,10 @@ func (rf *Raft) beCandidate() {
 				if tryTerm == rf.CurrentTerm {
 					rf.Role = LeaterRole
 					rf.MatchIndex = make([]int, len(rf.peers))
+					rf.NextIndex = make([]int, len(rf.peers))
+					for i := 0; i < len(rf.NextIndex); i++ {
+						rf.NextIndex[i] = len(rf.Log) + 1
+					}
 					rf.LeaderLastCommitTime = time.Now()
 					rf.mu.Unlock()
 					return
