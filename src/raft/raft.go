@@ -572,7 +572,13 @@ func (rf *Raft) pingPeer() {
 }
 
 func (rf *Raft) getPingCommand() (cmd interface{}) {
-	return rand.Int()
+	i := rand.Int()
+	if i > 0 {
+		i = -i
+	}
+
+	cmd = i
+	return
 }
 
 func (rf *Raft) loop() {
