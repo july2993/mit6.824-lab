@@ -250,9 +250,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	if len(args.Entries) > 0 {
 		DPrintf("*%+v* args: %+v reply: %+v\n", rf.me, args, *reply)
-		for i := 0; i < len(rf.Log); i++ {
-			DPrintf("%v\n", rf.Log[i])
-		}
+		DPrintf("log len: %v\n", len(rf.Log))
 	}
 
 	reply.Term = rf.CurrentTerm
@@ -280,11 +278,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	}
 
 	// ok
-	if args.LeaderCommit > rf.CommitIndex {
-		if args.PrevLogIndex+len(args.Entries) > rf.CommitIndex {
-			rf.CommitIndex = args.PrevLogIndex + len(args.Entries)
-			DPrintf("%v flowwer commit: %d\n", rf.me, rf.CommitIndex)
-		}
+	canCommitIndex := minInt(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+	if canCommitIndex > rf.CommitIndex {
+		rf.CommitIndex = canCommitIndex
+		DPrintf("%v flowwer commit: %d\n", rf.me, rf.CommitIndex)
 	}
 
 	if rf.Role == FlowerRole {
