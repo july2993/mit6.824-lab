@@ -30,8 +30,8 @@ import (
 // import "bytes"
 // import "encoding/gob"
 
-const ElectionTimeout = time.Millisecond * 300
-const PingPeerPeriod = time.Millisecond * 50
+const ElectionTimeout = time.Millisecond * 100
+const PingPeerPeriod = time.Millisecond * 10
 const MaxEntrysPerTime = 100
 
 type Role int
@@ -79,6 +79,8 @@ type Raft struct {
 	LastAppllyed         int
 	NextIndex            []int
 	MatchIndex           []int
+
+	lastResponseTime []time.Time
 
 	Role           Role
 	LastUpdateTime time.Time
@@ -360,8 +362,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}()
 
 	index := -1
-	term := -1
-	isLeader := true
+	term := rf.CurrentTerm
+	isLeader := (rf.Role == LeaterRole)
 
 	defer func() {
 		// fmt.Printf("Start retrun: %d %d %v\n", index, term, isLeader)
@@ -369,16 +371,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	term = rf.CurrentTerm
 
-	if rf.Role != LeaterRole {
-		isLeader = false
-		return index, term, isLeader
-	}
-
 	for i := 0; i < len(rf.Log); i++ {
 		if rf.Log[i].Command == command {
 			index = i + 1
 			return index, term, isLeader
 		}
+	}
+
+	if rf.Role != LeaterRole {
+		return index, term, isLeader
 	}
 
 	entry := &LogEntry{
@@ -429,6 +430,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.NextIndex = make([]int, len(peers))
 	rf.MatchIndex = make([]int, len(peers))
+	rf.lastResponseTime = make([]time.Time, len(peers))
 	rf.me = me
 
 	// Your initialization code here.
@@ -457,10 +459,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // 5.3 5.4
 func (rf *Raft) checkCanCommit(n int) bool {
-	// n := rf.CommitIndex + 1
-	// if len(rf.Log) < n {
-	// 	return false
-	// }
 	if len(rf.Log) < n || rf.Log[n-1].Term != rf.CurrentTerm {
 		return false
 	}
@@ -480,77 +478,92 @@ func (rf *Raft) checkCanCommit(n int) bool {
 }
 
 func (rf *Raft) pingPeer() {
-	for _ = range time.Tick(PingPeerPeriod) {
-		rf.mu.Lock()
-		// apply log
+	for i := 0; i < len(rf.peers); i++ {
+		go func(server int) {
+			var wait time.Duration = PingPeerPeriod
+			for {
+				time.Sleep(wait)
+				wait = PingPeerPeriod
 
-		if !rf.NeedAppend {
-			rf.mu.Unlock()
-			continue
-		}
+				rf.mu.Lock()
+				// apply log
 
-		// master commit log
-		if rf.Role == LeaterRole {
-			// DPrintf("*%+v* \n", *rf)
-			for cn := rf.CommitIndex + 1; cn <= len(rf.Log); cn++ {
-				if rf.checkCanCommit(cn) {
-					DPrintf("%v leader commit: %d %+v\n", rf.me, cn, *rf.Log[cn-1])
-					// fmt.Printf("leader commit: %d\n", rf.CommitIndex+1)
-					rf.CommitIndex = cn
-					rf.LeaderLastCommitTime = time.Now()
-				}
-			}
-		}
-
-		// leader or candidate AppendEntrys Flowwers
-		var args AppendEntriesArgs
-		args.Term = rf.CurrentTerm
-		args.LeaderId = rf.me
-		args.LeaderCommit = rf.CommitIndex
-
-		for server := 0; server < len(rf.peers); server++ {
-			if server == rf.me {
-				continue
-			}
-
-			if rf.Role == LeaterRole {
-				args.Entries = nil
-				args.PrevLogIndex = 0
-				args.PrevLogTerm = 0
-
-				if rf.NextIndex[server] == 0 || rf.NextIndex[server] > len(rf.Log)+1 {
-					rf.NextIndex[server] = len(rf.Log) + 1
+				if !rf.NeedAppend {
+					rf.mu.Unlock()
+					continue
 				}
 
-				entryNum := len(rf.Log) - rf.NextIndex[server] + 1
-				if entryNum > MaxEntrysPerTime {
-					entryNum = MaxEntrysPerTime
+				// master commit log
+				if rf.Role == LeaterRole {
+					// DPrintf("*%+v* \n", *rf)
+					for cn := rf.CommitIndex + 1; cn <= len(rf.Log); cn++ {
+						if rf.checkCanCommit(cn) {
+							DPrintf("%v leader commit: %d %+v\n", rf.me, cn, *rf.Log[cn-1])
+							// fmt.Printf("leader commit: %d\n", rf.CommitIndex+1)
+							rf.CommitIndex = cn
+							rf.LeaderLastCommitTime = time.Now()
+						}
+					}
 				}
 
-				start := rf.NextIndex[server] - 1
-				if start+entryNum > len(rf.Log) || start < 0 {
-					fmt.Println("fuck: ", len(rf.Log), start, entryNum)
-				}
-				args.Entries = append(args.Entries, rf.Log[start:start+entryNum]...)
+				// leader or candidate AppendEntrys Flowwers
+				var args AppendEntriesArgs
+				args.Term = rf.CurrentTerm
+				args.LeaderId = rf.me
+				args.LeaderCommit = rf.CommitIndex
 
-				args.PrevLogIndex = rf.NextIndex[server] - 1
-				if args.PrevLogIndex < 0 {
+				if server == rf.me {
+					rf.mu.Unlock()
+					continue
+				}
+
+				if rf.Role == LeaterRole {
+					args.Entries = nil
 					args.PrevLogIndex = 0
-				}
-				if args.PrevLogIndex > 0 {
-					args.PrevLogTerm = rf.Log[args.PrevLogIndex-1].Term
-				}
-			}
+					args.PrevLogTerm = 0
 
-			go func(server int, args AppendEntriesArgs) {
+					if rf.NextIndex[server] == 0 || rf.NextIndex[server] > len(rf.Log)+1 {
+						rf.NextIndex[server] = len(rf.Log) + 1
+					}
+
+					entryNum := len(rf.Log) - rf.NextIndex[server] + 1
+					if entryNum > MaxEntrysPerTime {
+						entryNum = MaxEntrysPerTime
+					}
+
+					start := rf.NextIndex[server] - 1
+					if start+entryNum > len(rf.Log) || start < 0 {
+						fmt.Println("fuck: ", len(rf.Log), start, entryNum)
+					}
+					args.Entries = append(args.Entries, rf.Log[start:start+entryNum]...)
+
+					args.PrevLogIndex = rf.NextIndex[server] - 1
+					if args.PrevLogIndex < 0 {
+						args.PrevLogIndex = 0
+					}
+					if args.PrevLogIndex > 0 {
+						args.PrevLogTerm = rf.Log[args.PrevLogIndex-1].Term
+					}
+				}
+
 				var reply = new(AppendEntriesReply)
+				rf.mu.Unlock()
 				ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-				// 返回可能失效了，比如我已经不是leater怎么处理好
+				rf.mu.Lock()
 				if ok {
-					rf.mu.Lock()
+
+					rf.feedResponseTime(server)
+					// delay response
+					if args.Term != rf.CurrentTerm {
+						rf.mu.Unlock()
+						continue
+					}
+
 					if reply.Term > rf.CurrentTerm {
 						rf.CurrentTerm = reply.Term
 						rf.setFlower()
+						rf.mu.Unlock()
+						continue
 					}
 					if reply.Success {
 
@@ -560,15 +573,18 @@ func (rf *Raft) pingPeer() {
 						if rf.NextIndex[server] > 0 {
 							rf.NextIndex[server]--
 						}
-					}
 
-					rf.mu.Unlock()
+						if rf.Role == LeaterRole {
+							wait = 0
+						}
+					}
+				} else {
+					wait = 0
 				}
 
-			}(server, args)
-		}
-
-		rf.mu.Unlock()
+				rf.mu.Unlock()
+			}
+		}(i)
 	}
 }
 
@@ -590,7 +606,9 @@ func (rf *Raft) loop() {
 		for {
 			select {
 			case <-time.Tick(time.Millisecond * 500):
+				rf.mu.Lock()
 				DPrintf("tick %v --- %+v\n", rf.me, *rf)
+				rf.mu.Unlock()
 
 			}
 		}
@@ -613,11 +631,25 @@ func (rf *Raft) loop() {
 		select {
 		case <-time.Tick(time.Millisecond * 1):
 			rf.mu.Lock()
+			// Start a no effect log avoid the previor term log can't be committed
 			if rf.Role == LeaterRole {
-				if rf.CommitIndex < len(rf.Log) && rf.getLastLogTerm() != rf.CurrentTerm && rf.LeaderLastCommitTime.Add(ElectionTimeout*5).Before(time.Now()) {
+				if rf.CommitIndex < len(rf.Log) && rf.getLastLogTerm() != rf.CurrentTerm && rf.LeaderLastCommitTime.Add(ElectionTimeout*3).Before(time.Now()) {
 					rf.mu.Unlock()
 					rf.Start(rf.getPingCommand())
 					rf.mu.Lock()
+				}
+
+				// can't still connected with majoratry
+				count := 0
+				for idx, lastTime := range rf.lastResponseTime {
+					if idx == rf.me || time.Now().Sub(lastTime) < ElectionTimeout {
+						count++
+					}
+				}
+				if count*2 <= len(rf.peers) {
+					go rf.beCandidate()
+					rf.mu.Unlock()
+					continue
 				}
 			}
 
@@ -650,19 +682,20 @@ func (rf *Raft) beCandidate() {
 	for {
 		select {
 		case <-nextElect.C:
+			rf.mu.Lock()
 			if rf.Role != CandidateRole {
 				DPrintf("%+v: to be not candidate\n", rf.me)
+				rf.mu.Unlock()
 				return
 			}
 
-			rf.mu.Lock()
 			rf.CurrentTerm++
 			rf.NeedAppend = true
 			tryTerm := rf.CurrentTerm
-			rf.mu.Unlock()
 			DPrintf("try elect: %+v\n", *rf)
+			rf.mu.Unlock()
 			if rf.tryGetVote() {
-				DPrintf("%+v: vote success", *rf)
+				DPrintf("%+v: %v vote success", *rf, rf.me)
 				rf.mu.Lock()
 				if tryTerm == rf.CurrentTerm {
 					rf.Role = LeaterRole
@@ -677,12 +710,17 @@ func (rf *Raft) beCandidate() {
 				}
 				rf.mu.Unlock()
 			} else {
+				rf.mu.Lock()
+				if tryTerm != rf.CurrentTerm {
+					rf.mu.Unlock()
+					continue
+				}
 				rf.NeedAppend = false
-				wait := time.Duration(rand.Intn(3 * int(ElectionTimeout)))
+				rf.mu.Unlock()
+				wait := time.Duration(rand.Intn(2 * int(ElectionTimeout)))
 				DPrintf("vote fail wait: +%v\n", wait)
 				nextElect = time.NewTimer(wait)
 			}
-
 		}
 	}
 
@@ -694,6 +732,13 @@ func (rf *Raft) getLastLogTerm() int {
 	}
 
 	return rf.lastLog().Term
+}
+
+func (rf *Raft) feedResponseTime(server int) {
+	now := time.Now()
+	if rf.lastResponseTime[server].Before(now) {
+		rf.lastResponseTime[server] = now
+	}
 }
 
 func (rf *Raft) tryGetVote() bool {
@@ -716,8 +761,11 @@ func (rf *Raft) tryGetVote() bool {
 
 			var reply = new(RequestVoteReply)
 			ok := rf.peers[peerId].Call("Raft.RequestVote", args, reply)
-			if ok && reply.VoteGranted {
-				votes <- true
+			if ok {
+				rf.feedResponseTime(peerId)
+				if reply.VoteGranted {
+					votes <- true
+				}
 			} else {
 				votes <- false
 			}
