@@ -97,12 +97,7 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	var term int
-	var isleader bool
-	// Your code here.
-	term = rf.CurrentTerm
-	isleader = (rf.Role == LeaterRole)
-	return term, isleader
+	return rf.CurrentTerm, rf.Role == LeaterRole
 }
 
 //
@@ -162,15 +157,10 @@ func (rf *Raft) lastLog() *LogEntry {
 	return rf.Log[len(rf.Log)-1]
 }
 
-//
-// example RequestVote RPC handler.
-//
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer func() {
-		rf.persist()
-	}()
+	defer rf.persist()
 	// Your code here.
 	if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
@@ -243,22 +233,20 @@ func (rf *Raft) checkPreLog(prevLogIndex int, prevLogTerm int) bool {
 
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	defer func() {
-		rf.persist()
-		rf.mu.Unlock()
-	}()
+	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	if len(args.Entries) > 0 {
 		DPrintf("*%+v* args: %+v reply: %+v\n", rf.me, args, *reply)
 		DPrintf("log len: %v\n", len(rf.Log))
 	}
 
-	reply.Term = rf.CurrentTerm
-
 	if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.setFlower()
 	}
+
+	reply.Term = rf.CurrentTerm
 
 	// 5.1
 	if args.Term < rf.CurrentTerm {
@@ -354,9 +342,7 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer func() {
-		rf.persist()
-	}()
+	defer rf.persist()
 
 	index := -1
 	term := rf.CurrentTerm
@@ -366,14 +352,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// fmt.Printf("Start retrun: %d %d %v\n", index, term, isLeader)
 	}()
 
-	term = rf.CurrentTerm
-
-	for i := 0; i < len(rf.Log); i++ {
-		if rf.Log[i].Command == command {
-			index = i + 1
-			return index, term, isLeader
-		}
-	}
+	// for i := 0; i < len(rf.Log); i++ {
+	// 	if rf.Log[i].Command == command {
+	// 		index = i + 1
+	// 		return index, term, isLeader
+	// 	}
+	// }
 
 	if rf.Role != LeaterRole {
 		return index, term, isLeader
