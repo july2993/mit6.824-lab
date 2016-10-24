@@ -558,6 +558,7 @@ func (rf *Raft) pingPeer() {
 
 					if reply.Term > rf.CurrentTerm {
 						rf.CurrentTerm = reply.Term
+						rf.persist()
 						rf.setFlower()
 						rf.mu.Unlock()
 						continue
@@ -687,6 +688,7 @@ func (rf *Raft) beCandidate() {
 			}
 
 			rf.CurrentTerm++
+			rf.persist()
 			rf.NeedAppend = true
 			tryTerm := rf.CurrentTerm
 			DPrintf("try elect: %+v\n", *rf)
