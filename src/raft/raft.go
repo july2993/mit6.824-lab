@@ -27,9 +27,9 @@ import (
 	"time"
 )
 
-const ElectionTimeout = time.Millisecond * 200
-const PingPeerPeriod = time.Millisecond * 30
-const MaxEntrysPerTime = 100
+const ElectionTimeout = time.Millisecond * 500
+const PingPeerPeriod = time.Millisecond * 50
+const MaxEntrysPerTime = 300
 
 type Role int
 
