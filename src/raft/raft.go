@@ -273,6 +273,12 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		reply.Success = false
 		if args.PrevLogIndex > len(rf.Log) {
 			reply.NextIndex = len(rf.Log) + 1
+		} else {
+			reply.NextIndex = args.PrevLogIndex
+			term := rf.Log[args.PrevLogIndex-1].Term
+			for reply.NextIndex > 1 && rf.Log[reply.NextIndex-1].Term == term {
+				reply.NextIndex--
+			}
 		}
 		return
 	}
@@ -282,7 +288,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		rf.appendLogAt(args.Entries[i], args.PrevLogIndex+(i+1))
 	}
 
-	// ok
+	// ok match PrevLogIndex
 	canCommitIndex := minInt(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
 	if canCommitIndex > rf.CommitIndex {
 		rf.CommitIndex = canCommitIndex
