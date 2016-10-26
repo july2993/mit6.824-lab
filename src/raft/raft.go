@@ -79,8 +79,7 @@ type Raft struct {
 
 	lastResponseTime []time.Time
 
-	Role           Role
-	LastUpdateTime time.Time
+	Role Role
 
 	applyCh chan ApplyMsg
 
@@ -295,10 +294,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		DPrintf("%v flowwer commit: %d\n", rf.me, rf.CommitIndex)
 	}
 
-	if rf.Role == FlowerRole {
-		rf.LastUpdateTime = time.Now()
-	}
-
 	reply.Success = true
 	return
 }
@@ -466,7 +461,6 @@ func (rf *Raft) setFlower() {
 	DPrintf("%v from %v to %v\n", rf.me, rf.Role, FlowerRole)
 	rf.VotedFor = -1
 	rf.Role = FlowerRole
-	rf.LastUpdateTime = time.Now()
 	rf.beFlowwer <- true
 }
 
@@ -499,7 +493,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.setFlower()
 	rf.applyCh = applyCh
-	rf.LastUpdateTime = time.Now().Add(-time.Duration(rand.Intn(int(ElectionTimeout))))
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -676,7 +669,7 @@ func (rf *Raft) loop() {
 			case <-rf.beFlowwer:
 			}
 		case FlowerRole:
-			timeout := ElectionTimeout + time.Duration(rand.Intn(int(ElectionTimeout*2)+22))
+			timeout := ElectionTimeout + time.Duration(rand.Intn(int(ElectionTimeout*1)+22))
 			select {
 			case <-rf.heartBeat:
 				// DPrintf("%v receive heartBeat\n", rf.me)
