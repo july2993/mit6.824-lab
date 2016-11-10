@@ -1,15 +1,17 @@
 package raftkv
 
 const (
-	OK       = "OK"
-	ErrNoKey = "ErrNoKey"
+	OK             = "OK"
+	ErrNoKey       = "ErrNoKey"
+	ErrWrongLeader = "wrong leader"
 )
 
 type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	// You'll have to add definitions here.
+	CID   int64
+	RID   int64
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
@@ -24,8 +26,9 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
+	RID int64
 	Key string
-	// You'll have to add definitions here.
+	CID int64
 }
 
 type GetReply struct {

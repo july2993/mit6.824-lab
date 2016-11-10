@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 const Debug = 0
@@ -17,11 +18,23 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+	PutAppendOP = iota
+	GetOP
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Kind  int
+	Key   string
+	Value string
+	Op    string
+
+	//
+	CID int64
+	RID int64
 }
 
 type RaftKV struct {
@@ -32,16 +45,136 @@ type RaftKV struct {
 
 	maxraftstate int // snapshot if log grows this big
 
+	db     map[string]string
+	dup    map[int64]int64
+	dbMu   sync.RWMutex
+	result map[int]chan Op
+
 	// Your definitions here.
 }
 
+func (kv *RaftKV) isDup(cid int64, rid int64) bool {
+	v, ok := kv.dup[cid]
+
+	if !ok {
+		return false
+	}
+
+	return v >= rid
+}
+
+func (kv *RaftKV) applyOp(op *Op) {
+	switch op.Kind {
+	case PutAppendOP:
+		kv.dbMu.Lock()
+		if op.Op == "Put" {
+			kv.db[op.Key] = op.Value
+		} else if op.Op == "Append" {
+			kv.db[op.Key] += op.Value
+		} else {
+			panic(op.Op)
+		}
+		kv.dbMu.Unlock()
+	case GetOP:
+	}
+
+	kv.dup[op.CID] = op.RID
+}
+
+func (kv *RaftKV) handleApply() {
+	for msg := range kv.applyCh {
+		op := msg.Command.(Op)
+		if !kv.isDup(op.CID, op.RID) {
+			kv.applyOp(&op)
+		}
+
+		kv.mu.Lock()
+		opChan, ok := kv.result[msg.Index]
+
+		if ok {
+			select {
+			case <-opChan:
+			default:
+			}
+
+			opChan <- op
+		} else {
+			opChan = make(chan Op, 1)
+			kv.result[msg.Index] = opChan
+		}
+
+		kv.mu.Unlock()
+	}
+}
+
+func (kv *RaftKV) appendOp(op Op) bool {
+	index, _, isLeader := kv.rf.Start(op)
+	if isLeader == false {
+		return false
+	}
+
+	kv.mu.Lock()
+	resultChan, ok := kv.result[index]
+	if !ok {
+		resultChan = make(chan Op, 1)
+		kv.result[index] = resultChan
+	}
+	kv.mu.Unlock()
+
+	select {
+	case <-resultChan:
+		return true
+	case <-time.NewTimer(time.Second).C:
+		return false
+	}
+
+	return false
+}
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	op := Op{
+		Kind: GetOP,
+		Key:  args.Key,
+		CID:  args.CID,
+		RID:  args.RID,
+	}
+
+	ok := kv.appendOp(op)
+
+	if !ok {
+		reply.WrongLeader = true
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.dbMu.RLock()
+	reply.Value = kv.db[args.Key]
+	kv.dbMu.RUnlock()
+
+	return
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	op := Op{
+		Kind:  PutAppendOP,
+		Key:   args.Key,
+		Value: args.Value,
+		Op:    args.Op,
+		CID:   args.CID,
+		RID:   args.RID,
+	}
+
+	ok := kv.appendOp(op)
+
+	if !ok {
+		reply.WrongLeader = true
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	return
 }
 
 //
@@ -78,10 +211,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// Your initialization code here.
+	kv.db = make(map[string]string)
+	kv.dup = make(map[int64]int64)
+	kv.result = make(map[int]chan Op)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	go kv.handleApply()
 
 	return kv
 }
