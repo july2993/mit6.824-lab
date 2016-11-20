@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"bytes"
 	"encoding/gob"
 	"labrpc"
 	"log"
@@ -83,27 +84,52 @@ func (kv *RaftKV) applyOp(op *Op) {
 
 func (kv *RaftKV) handleApply() {
 	for msg := range kv.applyCh {
-		op := msg.Command.(Op)
-		if !kv.isDup(op.CID, op.RID) {
-			kv.applyOp(&op)
-		}
+		if msg.UseSnapshot {
+			buffer := bytes.NewBuffer(msg.Snapshot)
+			d := gob.NewDecoder(buffer)
+			var index int
+			var term int
 
-		kv.mu.Lock()
-		opChan, ok := kv.result[msg.Index]
-
-		if ok {
-			select {
-			case <-opChan:
-			default:
+			kv.mu.Lock()
+			d.Decode(&index)
+			d.Decode(&term)
+			kv.db = make(map[string]string)
+			kv.dup = make(map[int64]int64)
+			d.Decode(&kv.db)
+			d.Decode(&kv.dup)
+			kv.mu.Unlock()
+		} else {
+			op := msg.Command.(Op)
+			if !kv.isDup(op.CID, op.RID) {
+				kv.applyOp(&op)
 			}
 
-			opChan <- op
-		} else {
-			opChan = make(chan Op, 1)
-			kv.result[msg.Index] = opChan
-		}
+			kv.mu.Lock()
+			opChan, ok := kv.result[msg.Index]
 
-		kv.mu.Unlock()
+			if ok {
+				select {
+				case <-opChan:
+				default:
+				}
+
+				opChan <- op
+			} else {
+				opChan = make(chan Op, 1)
+				opChan <- op
+				kv.result[msg.Index] = opChan
+			}
+
+			if kv.maxraftstate != -1 && kv.rf.GetPersistSize() > kv.maxraftstate {
+				buffer := new(bytes.Buffer)
+				e := gob.NewEncoder(buffer)
+				e.Encode(kv.db)
+				e.Encode(kv.dup)
+				go kv.rf.StartSnapshot(buffer.Bytes(), msg.Index)
+			}
+
+			kv.mu.Unlock()
+		}
 	}
 }
 
@@ -122,8 +148,9 @@ func (kv *RaftKV) appendOp(op Op) bool {
 	kv.mu.Unlock()
 
 	select {
-	case <-resultChan:
-		return true
+	case respOp := <-resultChan:
+		// you may think you are leader, but not, the return index may apply a log from the true leader
+		return respOp == op
 	case <-time.NewTimer(time.Second).C:
 		return false
 	}
