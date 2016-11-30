@@ -62,12 +62,15 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	preConfigOp bool
+
+	// need snapshoot
 	db          map[string]string
 	dup         map[int64]int64
-	dbMu        sync.RWMutex
-	result      map[int]chan Op
+	preConfigOp bool
 	config      []shardmaster.Config
+
+	dbMu   sync.RWMutex
+	result map[int]chan Op
 
 	mck *shardmaster.Clerk
 }
@@ -161,6 +164,9 @@ func (kv *ShardKV) handleApply() {
 			kv.dup = make(map[int64]int64)
 			d.Decode(&kv.db)
 			d.Decode(&kv.dup)
+			d.Decode(&kv.preConfigOp)
+			d.Decode(&kv.config)
+
 			kv.mu.Unlock()
 		} else {
 			op := msg.Command.(Op)
@@ -189,6 +195,9 @@ func (kv *ShardKV) handleApply() {
 				e := gob.NewEncoder(buffer)
 				e.Encode(kv.db)
 				e.Encode(kv.dup)
+				e.Encode(kv.preConfigOp)
+				e.Encode(kv.config)
+
 				go kv.rf.StartSnapshot(buffer.Bytes(), msg.Index)
 			}
 
