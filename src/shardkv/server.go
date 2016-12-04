@@ -143,8 +143,10 @@ func (kv *ShardKV) applyOp(op *Op) {
 		kv.mu.Unlock()
 	}
 
-	if op.Kind == ConfigOp || op.Kind == PreConfigOp || kv.checkGroup(op.Key) {
+	if op.Kind != ConfigOp || op.Kind != PreConfigOp || kv.checkGroup(op.Key) {
+		kv.dbMu.Lock()
 		kv.dup[op.CID] = op.RID
+		kv.dbMu.Unlock()
 	}
 }
 
@@ -169,7 +171,10 @@ func (kv *ShardKV) handleApply() {
 
 			kv.mu.Unlock()
 		} else {
-			op := msg.Command.(Op)
+			op, ok := msg.Command.(Op)
+			if !ok {
+				continue
+			}
 			if !kv.isDup(op.CID, op.RID) {
 				kv.applyOp(&op)
 			}
@@ -207,18 +212,24 @@ func (kv *ShardKV) handleApply() {
 }
 
 func (kv *ShardKV) appendOp(op Op) Err {
+	kv.mu.Lock()
+	if op.CID == 0 {
+		panic("0 cid")
+	}
+
 	if op.Kind != ConfigOp && op.Kind != PreConfigOp {
 		if kv.checkGroup(op.Key) == false {
+			kv.mu.Unlock()
 			return ErrWrongGroup
 		}
 	}
 
 	index, _, isLeader := kv.rf.Start(op)
 	if isLeader == false {
+		kv.mu.Unlock()
 		return ErrWrongLeader
 	}
 
-	kv.mu.Lock()
 	resultChan, ok := kv.result[index]
 	if !ok {
 		resultChan = make(chan Op, 1)
@@ -256,6 +267,7 @@ func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 	kv.mu.Unlock()
 
 	op := Op{
+		CID:    nrand(),
 		Kind:   PreConfigOp,
 		Config: args.Config,
 	}
@@ -347,26 +359,32 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 func (kv *ShardKV) String() string {
 	kv.mu.Lock()
+	tmp := *kv
 	defer kv.mu.Unlock()
 	var s string
 	s += fmt.Sprintf("config len: %v\n", len(kv.config))
-	s += fmt.Sprintf("+%v\n", *kv)
+	s += fmt.Sprintf("+%+v\n", tmp)
 
 	return s
 }
 
 func (kv *ShardKV) tryReconfig(now shardmaster.Config) bool {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
 	DPrintf("-%v- tryReconfig: %+v len: %v", strconv.Itoa(kv.gid)+"-"+strconv.Itoa(kv.me), now, len(kv.config))
+	defer func() {
+		DPrintf("-%v- tryReconfig  end: ", strconv.Itoa(kv.gid)+"-"+strconv.Itoa(kv.me))
+	}()
+
+	kv.mu.Lock()
+
 	if now.Num != len(kv.config) {
+		kv.mu.Unlock()
 		return false
 	}
 
 	var resp GetShardReply
 	if len(kv.config) > 0 {
 		last := kv.config[len(kv.config)-1]
+		kv.mu.Unlock()
 		for s := 0; s < shardmaster.NShards; s++ {
 			if now.Shards[s] == kv.gid && (last.Shards[s] != kv.gid && last.Shards[s] != 0) {
 				names := last.Groups[last.Shards[s]]
@@ -378,6 +396,7 @@ func (kv *ShardKV) tryReconfig(now shardmaster.Config) bool {
 					args.Shard = s
 
 					var reply GetShardReply
+					// 有可能卡住？
 					ok := srv.Call("ShardKV.GetShard", &args, &reply)
 					if ok && reply.Err == OK {
 						resp.Merge(&reply)
@@ -393,17 +412,18 @@ func (kv *ShardKV) tryReconfig(now shardmaster.Config) bool {
 				}
 			}
 		}
+	} else {
+		kv.mu.Unlock()
 	}
 
 	op := Op{
+		CID:           nrand(),
 		Kind:          ConfigOp,
 		Config:        now,
 		GetShardReply: resp,
 	}
 
-	kv.mu.Unlock()
 	err := kv.appendOp(op)
-	kv.mu.Lock()
 
 	if err != OK {
 		DPrintf("-%v- tryReconfig err: %+v %+v", strconv.Itoa(kv.gid)+"-"+strconv.Itoa(kv.me), err, now)
@@ -499,6 +519,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.maxraftstate = maxraftstate
 	kv.make_end = make_end
 	kv.gid = gid
+	if gid == 0 {
+		panic("fuck gid 0")
+	}
 	kv.masters = masters
 
 	// Your initialization code here.
