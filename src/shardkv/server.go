@@ -32,7 +32,7 @@ const (
 	PutAppendOP = iota
 	GetOP
 	ConfigOp
-	PreConfigOp // need to stop request
+	PreConfigOp
 )
 
 type Op struct {
@@ -49,7 +49,11 @@ type Op struct {
 	//
 	CID int64
 	RID int64
+
+	ApplyCode int
 }
+
+const WrongGruopCode = 1
 
 type ShardKV struct {
 	mu           sync.Mutex
@@ -64,12 +68,10 @@ type ShardKV struct {
 	// Your definitions here.
 
 	// need snapshoot
-	db          map[string]string
-	dup         map[int64]int64
-	preConfigOp bool
-	config      []shardmaster.Config
+	db     map[string]string
+	dup    map[int64]int64
+	config []shardmaster.Config
 
-	dbMu   sync.RWMutex
 	result map[int]chan Op
 
 	mck *shardmaster.Clerk
@@ -96,18 +98,23 @@ func (kv *ShardKV) checkGroup(k string) bool {
 		return false
 	}
 
-	if kv.preConfigOp {
-		return false
-	}
-
 	c := kv.config[len(kv.config)-1]
 	return c.Shards[shard] == kv.gid
 }
 
 func (kv *ShardKV) applyOp(op *Op) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if op.Kind == PutAppendOP || op.Kind == GetOP {
+		if kv.checkGroup(op.Key) == false {
+			op.ApplyCode = WrongGruopCode
+			return
+		}
+	}
+
 	switch op.Kind {
 	case PutAppendOP:
-		kv.dbMu.Lock()
 		if op.Op == "Put" {
 			kv.db[op.Key] = op.Value
 		} else if op.Op == "Append" {
@@ -115,16 +122,12 @@ func (kv *ShardKV) applyOp(op *Op) {
 		} else {
 			panic(op.Op)
 		}
-		kv.dbMu.Unlock()
 	case GetOP:
 	case ConfigOp:
-		kv.mu.Lock()
 		if op.Config.Num != len(kv.config) {
-			kv.mu.Unlock()
 			break
 		}
 
-		kv.preConfigOp = false
 		for k, v := range op.GetShardReply.DB {
 			kv.db[k] = v
 		}
@@ -134,20 +137,10 @@ func (kv *ShardKV) applyOp(op *Op) {
 			}
 		}
 		kv.config = append(kv.config, op.Config)
-		kv.mu.Unlock()
 	case PreConfigOp:
-		kv.mu.Lock()
-		if op.Config.Num == len(kv.config) {
-			kv.preConfigOp = true
-		}
-		kv.mu.Unlock()
 	}
 
-	if op.Kind != ConfigOp || op.Kind != PreConfigOp || kv.checkGroup(op.Key) {
-		kv.dbMu.Lock()
-		kv.dup[op.CID] = op.RID
-		kv.dbMu.Unlock()
-	}
+	kv.dup[op.CID] = op.RID
 }
 
 func (kv *ShardKV) handleApply() {
@@ -166,7 +159,6 @@ func (kv *ShardKV) handleApply() {
 			kv.dup = make(map[int64]int64)
 			d.Decode(&kv.db)
 			d.Decode(&kv.dup)
-			d.Decode(&kv.preConfigOp)
 			d.Decode(&kv.config)
 
 			kv.mu.Unlock()
@@ -200,7 +192,6 @@ func (kv *ShardKV) handleApply() {
 				e := gob.NewEncoder(buffer)
 				e.Encode(kv.db)
 				e.Encode(kv.dup)
-				e.Encode(kv.preConfigOp)
 				e.Encode(kv.config)
 
 				go kv.rf.StartSnapshot(buffer.Bytes(), msg.Index)
@@ -240,8 +231,10 @@ func (kv *ShardKV) appendOp(op Op) Err {
 	select {
 	case respOp := <-resultChan:
 		// you may think you are leader, but not, the return index may apply a log from the true leader
-		if respOp.RID == op.RID && respOp.CID == op.CID {
+		if respOp.RID == op.RID && respOp.CID == op.CID && respOp.ApplyCode == 0 {
 			return OK
+		} else if respOp.ApplyCode == WrongGruopCode {
+			return ErrWrongGroup
 		} else {
 			return ErrWrongLeader
 		}
@@ -259,7 +252,7 @@ func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 	}()
 
 	kv.mu.Lock()
-	if len(kv.config) < args.Config.Num {
+	if len(kv.config)-1 < args.Config.Num {
 		kv.mu.Unlock()
 		reply.Err = ErrNotReady
 		return
@@ -277,8 +270,8 @@ func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 		reply.Err = err
 		return
 	}
-	kv.dbMu.Lock()
-	defer kv.dbMu.Unlock()
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	reply.DB = make(map[string]string)
 	reply.Dup = make(map[int64]int64)
 	for k, v := range kv.db {
@@ -315,10 +308,10 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	kv.dbMu.RLock()
+	kv.mu.Lock()
 	var hasKey bool
 	reply.Value, hasKey = kv.db[args.Key]
-	kv.dbMu.RUnlock()
+	kv.mu.Unlock()
 	if hasKey == false {
 		reply.Err = ErrNoKey
 	} else {

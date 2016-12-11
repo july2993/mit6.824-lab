@@ -48,14 +48,20 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "encoding/gob"
-import "bytes"
+import (
+	"bytes"
+	"encoding/gob"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+)
+
 import "reflect"
-import "sync"
+
 import "log"
-import "strings"
+
 import "math/rand"
-import "time"
 
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
@@ -79,6 +85,14 @@ type ClientEnd struct {
 // the return value indicates success; false means the
 // server couldn't be contacted.
 func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bool {
+	t := time.Now()
+	defer func() {
+		use := time.Now().Sub(t)
+		if use.Seconds() > 1.0 {
+			fmt.Println("Call ", svcMeth, " use: ", use)
+		}
+	}()
+
 	req := reqMsg{}
 	req.endname = e.endname
 	req.svcMeth = svcMeth

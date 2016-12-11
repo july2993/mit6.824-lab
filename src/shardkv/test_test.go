@@ -14,6 +14,10 @@ func check(t *testing.T, ck *Clerk, key string, value string) {
 	}
 }
 
+// func TestGetShard(t *testing.T) {
+// 	fmt.Println(key2shard("G"))
+// }
+
 //
 // test static 2-way sharding, without shard movement.
 //
