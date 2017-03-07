@@ -245,6 +245,7 @@ func (kv *ShardKV) appendOp(op Op) Err {
 	return ErrWrongLeader
 }
 
+// delete老的数据可以让对方通知后走rafe log 删除没用了的shard数据
 func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) {
 	DPrintf("-%v- GetShard: %+v", strconv.Itoa(kv.gid)+"-"+strconv.Itoa(kv.me), *args)
 	defer func() {
@@ -512,9 +513,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.maxraftstate = maxraftstate
 	kv.make_end = make_end
 	kv.gid = gid
-	if gid == 0 {
-		panic("fuck gid 0")
-	}
 	kv.masters = masters
 
 	// Your initialization code here.

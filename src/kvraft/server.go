@@ -108,10 +108,10 @@ func (kv *RaftKV) handleApply() {
 			opChan, ok := kv.result[msg.Index]
 
 			if ok {
-				select {
-				case <-opChan:
-				default:
-				}
+				// select {
+				// case <-opChan:
+				// default:
+				// }
 
 				opChan <- op
 			} else {

@@ -856,6 +856,8 @@ func (rf *Raft) loop() {
 				time.Sleep(PingPeerPeriod)
 
 				rf.mu.Lock()
+				// leader 不能commit不是当前term的log, 如果没有其它请求原有log可能一直不commit
+				// 添加一个pingcommand 让它commit
 				if rf.CommitIndex < rf.getLastIndex() && rf.getLastLogTerm() != rf.CurrentTerm && rf.LeaderLastCommitTime.Add(ElectionTimeout*3).Before(time.Now()) {
 					rf.mu.Unlock()
 					rf.Start(rf.getPingCommand())
